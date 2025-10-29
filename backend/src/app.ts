@@ -5,6 +5,7 @@ import helmet from "helmet";
 import morgan from "morgan";
 
 import authRoutes from "./routes/authRoutes";
+import spjRoutes from "./routes/spjRoutes";
 
 const app = express();
 
@@ -15,6 +16,7 @@ app.use(morgan("combined"));
 app.use(express.json());
 
 app.use("/auth", authRoutes);
+app.use("/spj", spjRoutes);
 
 // Routes
 app.get("/", (req, res) => {

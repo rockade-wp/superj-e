@@ -18,7 +18,42 @@ export const login = async (email: string, password: string) => {
     { expiresIn: "1h" }
   );
 
-  // Jangan kembalikan passwordHash!
   const { passwordHash, ...safeUser } = user;
   return { token, user: safeUser };
+};
+
+export const register = async (
+  name: string,
+  email: string,
+  password: string,
+  role: string,
+  nip: string
+) => {
+  // Jika role bukan salah satu dari enum, tolak
+  const validRoles = [
+    "ADMIN",
+    "OPERATOR",
+    "PPK",
+    "PPTK",
+    "PENGURUS_BARANG",
+    "PPK_KEUANGAN",
+    "PA",
+  ];
+  if (!validRoles.includes(role)) {
+    throw new Error("Invalid role");
+  }
+
+  const existing = await prisma.user.findUnique({ where: { email } });
+  if (existing) throw new Error("Email already exists");
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  return prisma.user.create({
+    data: {
+      name,
+      email,
+      passwordHash,
+      role: role as any,
+      nip,
+    },
+  });
 };

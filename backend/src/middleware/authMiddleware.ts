@@ -23,15 +23,30 @@ export const authenticateToken = (
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.split(" ")[1];
 
-  if (!token) return res.sendStatus(401);
+  if (!token) {
+    return res.status(401).json({ message: "Unauthorized: No token provided" });
+  }
 
   jwt.verify(
     token,
     process.env.JWT_SECRET || "superje_jwt_secret_2025",
     (err, user) => {
-      if (err) return res.sendStatus(403);
+      if (err) {
+        return res
+          .status(403)
+          .json({ message: "Forbidden: Invalid or expired token" });
+      }
       req.user = user as JwtPayload;
       next();
     }
   );
+};
+
+export const authorizeRole = (...allowedRoles: string[]) => {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!allowedRoles.includes(req.user?.role || "")) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+    next();
+  };
 };

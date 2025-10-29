@@ -15,16 +15,22 @@ datasource db {
 }
 
 model User {
-  id                  String   @id @default(uuid())
+  id                  String           @id @default(uuid())
   name                String
-  email               String   @unique
-  passwordHash        String   
-  role                Role     @default(OPERATOR)
-  nip                 String   @unique
-  tte_certificate_url String?  
-  refreshToken        String?  
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  email               String           @unique
+  passwordHash        String
+  role                Role             @default(OPERATOR)
+  nip                 String           @unique
+  tte_certificate_url String?
+  refreshToken        String?
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+
+  // Relasi balik (required by Prisma)
+  spjSubmissions      SpjSubmission[]
+  signedForms         SignatureLog[]
+  validatedSheets     VerificationSheet[] @relation("ValidatorRelation")
+  verifiedSheets      VerificationSheet[] @relation("VerifierRelation")
 }
 
 enum Role {
@@ -35,4 +41,53 @@ enum Role {
   PENGURUS_BARANG
   PPK_KEUANGAN
   PA
+}
+
+model SpjSubmission {
+  id              String      @id @default(uuid())
+  rupId           String
+  year            Int
+  activityName    String
+  status          String      @default("draft")
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  operatorId      String
+  operator        User        @relation(fields: [operatorId], references: [id])
+  forms           SpjForm[]
+  verification    VerificationSheet? // <-- Hanya nama relasi, TANPA @relation(fields, references)
+}
+
+model SpjForm {
+  id                      String        @id @default(uuid())
+  spjId                   String
+  spjSubmission           SpjSubmission @relation(fields: [spjId], references: [id])
+  formType                Int           // 1–11
+  data                    Json
+  physicalSignatureScanUrl String?
+  status                  String        @default("filled")
+  notes                   String?
+  signatures              SignatureLog[]
+}
+
+model SignatureLog {
+  id         String   @id @default(uuid())
+  formId     String
+  form       SpjForm  @relation(fields: [formId], references: [id])
+  signerId   String
+  signer     User     @relation(fields: [signerId], references: [id])
+  signedAt   DateTime @default(now())
+  tteMetadata String?
+}
+
+model VerificationSheet {
+  id            String   @id @default(uuid())
+  spjId         String   @unique
+  spjSubmission SpjSubmission @relation(fields: [spjId], references: [id]) // <-- Hanya di sini
+  validatorId   String?
+  validator     User?    @relation("ValidatorRelation", fields: [validatorId], references: [id])
+  verifierId    String?
+  verifier      User?    @relation("VerifierRelation", fields: [verifierId], references: [id])
+  status        String   @default("pending")
+  notes         String?
+  signedAt      DateTime?
 }
