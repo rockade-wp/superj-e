@@ -17,10 +17,11 @@ app.use(express.json());
 
 app.use("/auth", authRoutes);
 app.use("/spj", spjRoutes);
+app.use("/uploads", express.static("uploads"));
 
 // Routes
 app.get("/", (req, res) => {
-  res.json({ message: "Welcome to SUPERJ-E API!" });
+    res.json({ message: "Welcome to SUPERJ-E API!" });
 });
 
 export default app;
