@@ -1,8 +1,8 @@
 import { PrismaClient } from "../generated/prisma";
+import { logActivity } from "./activityLogService";
 
 const prisma = new PrismaClient();
 
-// Pengurus Barang mengisi Lembar Verifikasi (Form 11) + TTE
 export const submitVerification = async (
     spjId: string,
     validatorId: string,
@@ -51,11 +51,11 @@ export const submitVerification = async (
         where: { id: spjId },
         data: { status: isValid ? "verified" : "rejected" },
     });
+    await logActivity(spjId, validatorId, "verify");
 
     return { status: isValid ? "valid" : "invalid", notes };
 };
 
-// PPK Keuangan melakukan verifikasi akhir
 export const finalizeSpj = async (
     spjId: string,
     verifierId: string,
@@ -87,6 +87,8 @@ export const finalizeSpj = async (
         where: { id: spjId },
         data: { status: isFinalValid ? "completed" : "rejected" },
     });
+
+    await logActivity(spjId, verifierId, "finalize");
 
     return { status: isFinalValid ? "completed" : "rejected" };
 };

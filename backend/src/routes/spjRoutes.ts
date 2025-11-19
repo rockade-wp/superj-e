@@ -13,6 +13,8 @@ import {
     submitVerification,
     finalizeSpj,
 } from "../services/verificationService";
+import { logActivity } from "../services/activityLogService";
+import { generateSpjExcel } from "../utils/excelGenerator";
 import { authenticateToken, authorizeRole } from "../middleware/authMiddleware";
 import archiver from "archiver";
 import fs from "fs";
@@ -46,7 +48,7 @@ router.post(
             const { rupId, year, activityName } = req.body;
             const submission = await createSpjSubmission(
                 rupId,
-                year,
+                parseInt(year),
                 activityName,
                 req.user!.id
             );
@@ -56,6 +58,71 @@ router.post(
         }
     }
 );
+
+router.get("/", authenticateToken, async (req, res) => {
+    try {
+        let spjSubmissions;
+
+        if (req.user?.role === "OPERATOR") {
+            spjSubmissions = await prisma.spjSubmission.findMany({
+                where: { operatorId: req.user.id },
+                include: {
+                    // --- TAMBAHKAN INI ---
+                    forms: {
+                        orderBy: { formType: "asc" },
+                    },
+                },
+                orderBy: { createdAt: "desc" },
+            });
+        } else {
+            spjSubmissions = await prisma.spjSubmission.findMany({
+                include: {
+                    // --- DAN INI ---
+                    forms: {
+                        orderBy: { formType: "asc" },
+                    },
+                },
+                orderBy: { createdAt: "desc" },
+            });
+        }
+
+        res.json(spjSubmissions);
+    } catch (error: any) {
+        res.status(500).json({ error: "Gagal mengambil data SPJ" });
+    }
+});
+
+router.get("/:spjId", authenticateToken, async (req, res) => {
+    try {
+        const { spjId } = req.params;
+        const spj = await prisma.spjSubmission.findUnique({
+            where: { id: spjId },
+            include: {
+                forms: {
+                    orderBy: { formType: "asc" }, // Urutkan form dari 1 ke 11
+                },
+                operator: {
+                    select: { name: true, email: true },
+                },
+            },
+        });
+
+        if (!spj) {
+            return res.status(404).json({ error: "SPJ tidak ditemukan" });
+        }
+
+        // Tambahkan validasi: hanya operator yang membuatnya yang bisa lihat
+        if (req.user?.role === "OPERATOR" && spj.operatorId !== req.user.id) {
+            return res
+                .status(403)
+                .json({ error: "Anda tidak berwenang melihat SPJ ini" });
+        }
+
+        res.json(spj);
+    } catch (error: any) {
+        res.status(500).json({ error: "Gagal mengambil detail SPJ" });
+    }
+});
 
 router.patch(
     "/:spjId/form/:formType",
@@ -96,6 +163,7 @@ router.post(
 
             // Simpan ke database
             await uploadScan(spjId, parseInt(formType), filePath, req.user!.id);
+            await logActivity(spjId, req.user!.id, `upload_scan_${formType}`);
 
             res.json({ message: "Scan berhasil diunggah", path: filePath });
         } catch (error: any) {
@@ -220,10 +288,7 @@ router.get(
                 include: {
                     forms: true,
                     verification: {
-                        include: {
-                            validator: true,
-                            verifier: true,
-                        },
+                        include: { validator: true, verifier: true },
                     },
                     operator: true,
                 },
@@ -235,77 +300,22 @@ router.get(
                     .json({ error: "SPJ tidak ditemukan atau belum selesai" });
             }
 
-            // Buat file ZIP
-            const zip = archiver("zip", { zlib: { level: 9 } });
-            res.setHeader("Content-Type", "application/zip");
+            const excelBuffer = await generateSpjExcel(spj);
+
+            res.setHeader(
+                "Content-Type",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            );
             res.setHeader(
                 "Content-Disposition",
-                `attachment; filename=SPJ_${spj.rupId}.zip`
+                `attachment; filename=SPJ_${spj.rupId}.xlsx`
             );
-            zip.pipe(res);
+            res.send(excelBuffer);
 
-            // Tambahkan semua form sebagai file teks
-            for (const form of spj.forms) {
-                let content = "";
-                const fileName = `Form_${form.formType}_${getFormName(
-                    form.formType
-                )}.txt`;
-
-                if (form.formType === 11 && spj.verification) {
-                    // Form 11: ambil data dari VerificationSheet, bukan form.data
-                    content = JSON.stringify(
-                        {
-                            validator: spj.verification.validator?.name,
-                            validatorNip: spj.verification.validator?.nip,
-                            verifier: spj.verification.verifier?.name,
-                            verifierNip: spj.verification.verifier?.nip,
-                            status: spj.verification.status,
-                            notes: spj.verification.notes,
-                            signedAt: spj.verification.signedAt,
-                        },
-                        null,
-                        2
-                    );
-                } else {
-                    // Form 1-10: ambil dari form.data
-                    content =
-                        JSON.stringify(form.data, null, 2) +
-                        (form.physicalSignatureScanUrl
-                            ? `\n\nScan URL: ${form.physicalSignatureScanUrl}`
-                            : "");
-                }
-
-                zip.append(content, { name: fileName });
-            }
-
-            // Tambahkan Lembar Verifikasi
-            if (spj.verification) {
-                zip.append(JSON.stringify(spj.verification, null, 2), {
-                    name: "Lembar_Verifikasi.txt",
-                });
-            }
-
-            // Tambahkan file scan asli (jika ada)
-            for (const form of spj.forms) {
-                if (form.physicalSignatureScanUrl) {
-                    const fileName = path.basename(
-                        form.physicalSignatureScanUrl
-                    );
-                    const filePath = path.join(uploadsDir, fileName);
-
-                    if (fs.existsSync(filePath)) {
-                        // Gunakan ekstensi asli file
-                        const ext = path.extname(fileName).toLowerCase();
-                        const outputName = `Scan_Form_${form.formType}${ext}`;
-                        zip.file(filePath, { name: outputName });
-                    }
-                }
-            }
-
-            await zip.finalize();
+            await logActivity(spjId, req.user!.id, "download");
         } catch (error: any) {
-            console.error("Download error:", error);
-            res.status(500).json({ error: "Gagal membuat berkas unduhan" });
+            console.error("Excel generation error:", error);
+            res.status(500).json({ error: "Gagal membuat berkas Excel" });
         }
     }
 );
@@ -326,5 +336,21 @@ function getFormName(formType: number): string {
     ];
     return names[formType] || `Form_${formType}`;
 }
+
+router.get(
+    "/logs",
+    authenticateToken,
+    authorizeRole("PA"),
+    async (req, res) => {
+        const logs = await prisma.activityLog.findMany({
+            include: {
+                user: { select: { name: true, role: true } },
+                spj: { select: { rupId: true, activityName: true } },
+            },
+            orderBy: { timestamp: "desc" },
+        });
+        res.json(logs);
+    }
+);
 
 export default router;

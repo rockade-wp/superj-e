@@ -31,6 +31,7 @@ model User {
   signedForms         SignatureLog[]
   validatedSheets     VerificationSheet[] @relation("ValidatorRelation")
   verifiedSheets      VerificationSheet[] @relation("VerifierRelation")
+  activityLogs ActivityLog[]
 }
 
 enum Role {
@@ -55,6 +56,7 @@ model SpjSubmission {
   operator        User        @relation(fields: [operatorId], references: [id])
   forms           SpjForm[]
   verification    VerificationSheet? // <-- Hanya nama relasi, TANPA @relation(fields, references)
+  activityLogs ActivityLog[]
 }
 
 model SpjForm {
@@ -90,4 +92,14 @@ model VerificationSheet {
   status        String   @default("pending")
   notes         String?
   signedAt      DateTime?
+}
+
+model ActivityLog {
+  id        String   @id @default(uuid())
+  spjId     String
+  userId    String
+  action    String
+  timestamp DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+  spj       SpjSubmission @relation(fields: [spjId], references: [id])
 }

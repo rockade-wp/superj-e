@@ -1,4 +1,5 @@
 import { PrismaClient } from "../generated/prisma";
+import { logActivity } from "./activityLogService";
 
 const prisma = new PrismaClient();
 
@@ -9,7 +10,7 @@ export const createSpjSubmission = async (
     operatorId: string
 ) => {
     return prisma.$transaction(async (tx) => {
-        // Buat SPJ Submission
+        // 1. Buat SPJ
         const submission = await tx.spjSubmission.create({
             data: {
                 rupId,
@@ -20,7 +21,7 @@ export const createSpjSubmission = async (
             },
         });
 
-        // Generate 11 form kosong
+        // 2. Buat 11 form
         const forms = [];
         for (let formType = 1; formType <= 11; formType++) {
             forms.push(
@@ -28,19 +29,27 @@ export const createSpjSubmission = async (
                     data: {
                         spjId: submission.id,
                         formType,
-                        data: {}, // JSON kosong
+                        data: {},
                         status: "filled",
                     },
                 })
             );
         }
-
         await Promise.all(forms);
+
+        // 3. Log activity — gunakan TX, bukan prisma global!
+        await tx.activityLog.create({
+            data: {
+                spjId: submission.id,
+                userId: operatorId,
+                action: "submit",
+            },
+        });
+
         return submission;
     });
 };
 
-// Tambahkan fungsi ini di bawah createSpjSubmission
 export const updateSpjForm = async (
     spjId: string,
     formType: number,
@@ -114,6 +123,8 @@ export const signSpjForm = async (
             },
         });
     }
+    const action = notes ? `reject_form_${formType}` : `sign_form_${formType}`;
+    await logActivity(spjId, signerId, action);
 
     return { status, notes };
 };
