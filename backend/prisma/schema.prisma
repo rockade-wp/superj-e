@@ -49,6 +49,7 @@ model SpjSubmission {
   rupId           String
   year            Int
   activityName    String
+  activity        String
   status          String      @default("draft")
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
@@ -66,6 +67,7 @@ model SpjForm {
   formType                Int           // 1–11
   data                    Json
   physicalSignatureScanUrl String?
+  physicalSignatureFileType String?
   status                  String        @default("filled")
   notes                   String?
   signatures              SignatureLog[]
@@ -91,6 +93,7 @@ model VerificationSheet {
   verifier      User?    @relation("VerifierRelation", fields: [verifierId], references: [id])
   status        String   @default("pending")
   notes         String?
+  finalNotes String?
   signedAt      DateTime?
 }
 

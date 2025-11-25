@@ -19,18 +19,33 @@ export const submitVerification = async (
         );
     }
 
-    // Cek apakah semua form sudah disetujui
-    // Hanya periksa form 1–10
+    // Cek apakah semua form 1-10 sudah ditandatangani (status 'signed')
     const forms = await prisma.spjForm.findMany({
         where: { spjId, formType: { in: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] } },
     });
     const allSigned =
         forms.length === 10 && forms.every((form) => form.status === "signed");
     if (!allSigned) {
-        throw new Error("Semua form harus ditandatangani sebelum verifikasi");
+        throw new Error(
+            "Semua form 1-10 harus ditandatangani sebelum verifikasi"
+        );
     }
 
-    // Simpan lembar verifikasi
+    // Update Form 11 (Lembar Verifikasi) dengan data verifikasi awal
+    await prisma.spjForm.updateMany({
+        where: { spjId, formType: 11 },
+        data: {
+            data: {
+                validator_nama: validator.name,
+                validator_nip: validator.nip,
+                notes_verifikasi: notes || null,
+                status_verifikasi: isValid ? "valid" : "invalid",
+            },
+            status: isValid ? "filled" : "rejected", // Status form 11 diisi
+        },
+    });
+
+    // Simpan lembar verifikasi (VerificationSheet)
     await prisma.verificationSheet.upsert({
         where: { spjId },
         create: {
@@ -76,13 +91,32 @@ export const finalizeSpj = async (
         throw new Error("SPJ belum diverifikasi oleh Pengurus Barang");
     }
 
-    // Update verifikasi akhir
-    await prisma.verificationSheet.update({
-        where: { spjId },
-        data: { verifierId, signedAt: new Date() },
+    // Update Form 11 (Lembar Verifikasi) dengan data finalisasi
+    await prisma.spjForm.updateMany({
+        where: { spjId, formType: 11 },
+        data: {
+            data: {
+                verifier_nama: verifier.name,
+                verifier_nip: verifier.nip,
+                notes_finalisasi: notes || null,
+                status_finalisasi: isFinalValid ? "completed" : "rejected",
+            },
+            status: isFinalValid ? "signed" : "rejected", // Status form 11 ditandatangani/final
+        },
     });
 
-    // Finalisasi status
+    // Update verifikasi akhir (VerificationSheet)
+    await prisma.verificationSheet.update({
+        where: { spjId },
+        data: {
+            verifierId,
+            finalNotes: notes || null,
+            status: isFinalValid ? "completed" : "rejected",
+            signedAt: new Date(),
+        },
+    });
+
+    // Finalisasi status SPJ
     await prisma.spjSubmission.update({
         where: { id: spjId },
         data: { status: isFinalValid ? "completed" : "rejected" },

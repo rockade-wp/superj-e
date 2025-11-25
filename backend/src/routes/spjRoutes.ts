@@ -1,23 +1,21 @@
 import { Router } from "express";
 import multer from "multer";
 import path from "path";
-// import { PrismaClient } from "@prisma/client";
 import prisma from "../prisma";
 import {
     createSpjSubmission,
     updateSpjForm,
     uploadScan,
     signSpjForm,
+    getDraftForm,
 } from "../services/spjService";
 import {
     submitVerification,
     finalizeSpj,
 } from "../services/verificationService";
 import { logActivity } from "../services/activityLogService";
-import { generateSpjExcel } from "../utils/excelGenerator";
+import { generateSpjPDF, generateSingleFormPDF } from "../utils/pdfGenerator";
 import { authenticateToken, authorizeRole } from "../middleware/authMiddleware";
-import archiver from "archiver";
-import fs from "fs";
 
 const router = Router();
 
@@ -37,19 +35,26 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage: storage });
 
-const uploadsDir = path.resolve("uploads");
-
+// 1. Create new SPJ submission
 router.post(
     "/",
     authenticateToken,
     authorizeRole("OPERATOR"),
     async (req, res) => {
         try {
-            const { rupId, year, activityName } = req.body;
+            const { rupId, year, activityName, activity } = req.body;
+
+            if (!rupId || !year || !activityName || !activity) {
+                return res.status(400).json({
+                    error: "rupId, year, activityName, dan activity wajib diisi",
+                });
+            }
+
             const submission = await createSpjSubmission(
                 rupId,
                 parseInt(year),
                 activityName,
+                activity,
                 req.user!.id
             );
             res.status(201).json(submission);
@@ -59,6 +64,7 @@ router.post(
     }
 );
 
+// 2. Get all SPJ submissions (filtered by role)
 router.get("/", authenticateToken, async (req, res) => {
     try {
         let spjSubmissions;
@@ -67,9 +73,11 @@ router.get("/", authenticateToken, async (req, res) => {
             spjSubmissions = await prisma.spjSubmission.findMany({
                 where: { operatorId: req.user.id },
                 include: {
-                    // --- TAMBAHKAN INI ---
                     forms: {
                         orderBy: { formType: "asc" },
+                    },
+                    operator: {
+                        select: { name: true, email: true, role: true },
                     },
                 },
                 orderBy: { createdAt: "desc" },
@@ -77,9 +85,11 @@ router.get("/", authenticateToken, async (req, res) => {
         } else {
             spjSubmissions = await prisma.spjSubmission.findMany({
                 include: {
-                    // --- DAN INI ---
                     forms: {
                         orderBy: { formType: "asc" },
+                    },
+                    operator: {
+                        select: { name: true, email: true, role: true },
                     },
                 },
                 orderBy: { createdAt: "desc" },
@@ -92,6 +102,28 @@ router.get("/", authenticateToken, async (req, res) => {
     }
 });
 
+// 3. Get activity logs (PA only)
+router.get(
+    "/logs",
+    authenticateToken,
+    authorizeRole("PA"),
+    async (req, res) => {
+        try {
+            const logs = await prisma.activityLog.findMany({
+                include: {
+                    user: { select: { name: true, role: true } },
+                    spj: { select: { rupId: true, activityName: true } },
+                },
+                orderBy: { timestamp: "desc" },
+            });
+            res.json(logs);
+        } catch (error: any) {
+            res.status(500).json({ error: "Gagal mengambil log aktivitas" });
+        }
+    }
+);
+
+// 4. Get single SPJ detail
 router.get("/:spjId", authenticateToken, async (req, res) => {
     try {
         const { spjId } = req.params;
@@ -99,10 +131,33 @@ router.get("/:spjId", authenticateToken, async (req, res) => {
             where: { id: spjId },
             include: {
                 forms: {
-                    orderBy: { formType: "asc" }, // Urutkan form dari 1 ke 11
+                    orderBy: { formType: "asc" },
+                    include: {
+                        signatures: {
+                            include: {
+                                signer: {
+                                    select: {
+                                        name: true,
+                                        role: true,
+                                        nip: true,
+                                    },
+                                },
+                            },
+                        },
+                    },
                 },
                 operator: {
-                    select: { name: true, email: true },
+                    select: { name: true, email: true, nip: true, role: true },
+                },
+                verification: {
+                    include: {
+                        validator: {
+                            select: { name: true, nip: true, role: true },
+                        },
+                        verifier: {
+                            select: { name: true, nip: true, role: true },
+                        },
+                    },
                 },
             },
         });
@@ -111,7 +166,7 @@ router.get("/:spjId", authenticateToken, async (req, res) => {
             return res.status(404).json({ error: "SPJ tidak ditemukan" });
         }
 
-        // Tambahkan validasi: hanya operator yang membuatnya yang bisa lihat
+        // Validasi akses untuk OPERATOR
         if (req.user?.role === "OPERATOR" && spj.operatorId !== req.user.id) {
             return res
                 .status(403)
@@ -124,6 +179,7 @@ router.get("/:spjId", authenticateToken, async (req, res) => {
     }
 });
 
+// 5. Update form data
 router.patch(
     "/:spjId/form/:formType",
     authenticateToken,
@@ -140,13 +196,62 @@ router.patch(
                 req.user!.id
             );
 
-            res.json({ message: "Form updated successfully" });
+            res.json({ message: "Form berhasil diperbarui" });
         } catch (error: any) {
             res.status(400).json({ error: error.message });
         }
     }
 );
 
+// 6. Download draft form (Form 1, 2, 3 only)
+router.get(
+    "/:spjId/form/:formType/download-draft",
+    authenticateToken,
+    authorizeRole("OPERATOR"),
+    async (req, res) => {
+        try {
+            const { spjId, formType } = req.params;
+            const formTypeInt = parseInt(formType);
+
+            if (formTypeInt < 1 || formTypeInt > 3) {
+                return res.status(400).json({
+                    error: "Hanya Form 1, 2, dan 3 yang dapat diunduh sebagai draft.",
+                });
+            }
+
+            const { formData, spjMetadata } = await getDraftForm(
+                spjId,
+                formTypeInt
+            );
+
+            const pdfBuffer = await generateSingleFormPDF(
+                formTypeInt,
+                formData,
+                spjMetadata
+            );
+
+            res.setHeader("Content-Type", "application/pdf");
+            res.setHeader(
+                "Content-Disposition",
+                `attachment; filename=DRAFT_${getFormName(formTypeInt)}_${
+                    spjMetadata.rupId
+                }.pdf`
+            );
+            res.send(pdfBuffer);
+
+            await logActivity(
+                spjId,
+                req.user!.id,
+                `download_draft_form_${formType}`
+            );
+        } catch (error: any) {
+            console.error("Draft download error:", error);
+            res.status(400).json({ error: error.message });
+        }
+    }
+);
+
+// 7. Upload physical signature scan
 router.post(
     "/:spjId/form/:formType/upload",
     authenticateToken,
@@ -155,17 +260,37 @@ router.post(
     async (req, res) => {
         try {
             const { spjId, formType } = req.params;
+            const { fileType } = req.body;
             const filePath = req.file ? `/uploads/${req.file.filename}` : null;
 
             if (!filePath) {
-                return res.status(400).json({ error: "No file uploaded" });
+                return res.status(400).json({ error: "File tidak ditemukan" });
             }
 
-            // Simpan ke database
-            await uploadScan(spjId, parseInt(formType), filePath, req.user!.id);
-            await logActivity(spjId, req.user!.id, `upload_scan_${formType}`);
+            if (fileType !== "pdf" && fileType !== "excel") {
+                return res.status(400).json({
+                    error: "Tipe file harus 'pdf' atau 'excel'",
+                });
+            }
 
-            res.json({ message: "Scan berhasil diunggah", path: filePath });
+            await uploadScan(
+                spjId,
+                parseInt(formType),
+                filePath,
+                req.user!.id,
+                fileType as "pdf" | "excel"
+            );
+
+            await logActivity(
+                spjId,
+                req.user!.id,
+                `upload_physical_scan_form_${formType}`
+            );
+
+            res.json({
+                message: "Scan fisik berhasil diunggah",
+                path: filePath,
+            });
         } catch (error: any) {
             console.error("Upload error:", error);
             res.status(400).json({ error: error.message });
@@ -173,18 +298,18 @@ router.post(
     }
 );
 
+// 8. Sign form with TTE
 router.post(
     "/:spjId/form/:formType/sign",
     authenticateToken,
-    // authorizeRole akan dicek manual berdasarkan formType
     async (req, res) => {
         try {
             const { spjId, formType } = req.params;
-            const { notes } = req.body; // opsional
+            const { notes } = req.body;
             const signerId = req.user!.id;
             const signerRole = req.user!.role;
 
-            // Validasi: role pejabat sesuai formType
+            // Validasi role sesuai form
             const validRoles = getValidRolesForForm(parseInt(formType));
             if (!validRoles.includes(signerRole)) {
                 return res.status(403).json({
@@ -198,6 +323,7 @@ router.post(
                 signerId,
                 notes
             );
+
             res.json(result);
         } catch (error: any) {
             res.status(400).json({ error: error.message });
@@ -205,35 +331,7 @@ router.post(
     }
 );
 
-function getValidRolesForForm(formType: number): string[] {
-    switch (formType) {
-        case 1:
-            return ["PPK"]; // Surat Pesanan Barang
-        case 2:
-            return ["PPK"]; // Bukti Pembelian
-        case 3:
-            return ["PA"]; // Kwitansi
-        case 4:
-            return ["OPERATOR"]; // Permohonan Serah Terima (operator)
-        case 5:
-            return ["PPK"]; // Penyerahan Barang
-        case 6:
-            return ["PPTK"]; // BA Serah Terima (PPTK)
-        case 7:
-            return ["PA"]; // Surat Perintah Pengeluaran
-        case 8:
-            return ["PENGURUS_BARANG"]; // BA Penerimaan
-        case 9:
-            return ["PPTK"]; // BA Serah Terima (lagi)
-        case 10:
-            return ["PENGURUS_BARANG"]; // Surat Pernyataan
-        case 11:
-            return ["PENGURUS_BARANG"]; // Lembar Verifikasi
-        default:
-            return [];
-    }
-}
-
+// 9. Submit verification (Pengurus Barang)
 router.post(
     "/:spjId/verify",
     authenticateToken,
@@ -242,12 +340,20 @@ router.post(
         try {
             const { spjId } = req.params;
             const { isValid, notes } = req.body;
+
+            if (typeof isValid !== "boolean") {
+                return res.status(400).json({
+                    error: "isValid harus berupa boolean (true/false)",
+                });
+            }
+
             const result = await submitVerification(
                 spjId,
                 req.user!.id,
                 isValid,
                 notes
             );
+
             res.json(result);
         } catch (error: any) {
             res.status(400).json({ error: error.message });
@@ -255,6 +361,7 @@ router.post(
     }
 );
 
+// 10. Finalize SPJ (PPK Keuangan)
 router.post(
     "/:spjId/finalize",
     authenticateToken,
@@ -263,12 +370,20 @@ router.post(
         try {
             const { spjId } = req.params;
             const { isFinalValid, notes } = req.body;
+
+            if (typeof isFinalValid !== "boolean") {
+                return res.status(400).json({
+                    error: "isFinalValid harus berupa boolean (true/false)",
+                });
+            }
+
             const result = await finalizeSpj(
                 spjId,
                 req.user!.id,
                 isFinalValid,
                 notes
             );
+
             res.json(result);
         } catch (error: any) {
             res.status(400).json({ error: error.message });
@@ -276,49 +391,84 @@ router.post(
     }
 );
 
-router.get(
-    "/:spjId/download",
-    authenticateToken,
-    authorizeRole("OPERATOR"),
-    async (req, res) => {
-        try {
-            const { spjId } = req.params;
-            const spj = await prisma.spjSubmission.findUnique({
-                where: { id: spjId },
-                include: {
-                    forms: true,
-                    verification: {
-                        include: { validator: true, verifier: true },
-                    },
-                    operator: true,
+// 11. Download complete SPJ PDF
+router.get("/:spjId/download", authenticateToken, async (req, res) => {
+    try {
+        const { spjId } = req.params;
+        const spj = await prisma.spjSubmission.findUnique({
+            where: { id: spjId },
+            include: {
+                forms: true,
+                verification: {
+                    include: { validator: true, verifier: true },
                 },
-            });
+                operator: true,
+            },
+        });
 
-            if (!spj || spj.status !== "completed") {
-                return res
-                    .status(404)
-                    .json({ error: "SPJ tidak ditemukan atau belum selesai" });
-            }
-
-            const excelBuffer = await generateSpjExcel(spj);
-
-            res.setHeader(
-                "Content-Type",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            );
-            res.setHeader(
-                "Content-Disposition",
-                `attachment; filename=SPJ_${spj.rupId}.xlsx`
-            );
-            res.send(excelBuffer);
-
-            await logActivity(spjId, req.user!.id, "download");
-        } catch (error: any) {
-            console.error("Excel generation error:", error);
-            res.status(500).json({ error: "Gagal membuat berkas Excel" });
+        if (!spj) {
+            return res.status(404).json({ error: "SPJ tidak ditemukan" });
         }
+
+        if (spj.status !== "completed") {
+            return res.status(400).json({
+                error: "SPJ belum selesai, tidak dapat diunduh",
+            });
+        }
+
+        const spjForPDF = {
+            ...spj,
+            forms: spj.forms.map((form: any) => ({
+                ...form,
+                formType: String(form.formType),
+            })),
+        };
+
+        const pdfBuffer = await generateSpjPDF(spjForPDF);
+
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader(
+            "Content-Disposition",
+            `attachment; filename=SPJ_${spj.rupId}_${spj.year}.pdf`
+        );
+        res.send(pdfBuffer);
+
+        await logActivity(spjId, req.user!.id, "download_complete_spj");
+    } catch (error: any) {
+        console.error("PDF generation error:", error);
+        res.status(500).json({ error: "Gagal membuat berkas PDF" });
     }
-);
+});
+
+// Helper function
+function getValidRolesForForm(formType: number): string[] {
+    switch (formType) {
+        case 1:
+            return ["PPK"];
+        case 2:
+            return ["PPK"];
+        case 3:
+            return ["PA"];
+        case 4:
+            return ["OPERATOR"];
+        case 5:
+            return ["PPK"];
+        case 6:
+            return ["PPTK"];
+        case 7:
+            return ["PA"];
+        case 8:
+            return ["PENGURUS_BARANG"];
+        case 9:
+            return ["PPTK"];
+        case 10:
+            return ["PENGURUS_BARANG"];
+        case 11:
+            return ["PPK_KEUANGAN"];
+        default:
+            return [];
+    }
+}
 
 function getFormName(formType: number): string {
     const names = [
@@ -333,24 +483,9 @@ function getFormName(formType: number): string {
         "BA_Penerimaan",
         "BA_Serah_Terima_2",
         "Surat_Pernyataan",
+        "Lembar_Verifikasi",
     ];
     return names[formType] || `Form_${formType}`;
 }
-
-router.get(
-    "/logs",
-    authenticateToken,
-    authorizeRole("PA"),
-    async (req, res) => {
-        const logs = await prisma.activityLog.findMany({
-            include: {
-                user: { select: { name: true, role: true } },
-                spj: { select: { rupId: true, activityName: true } },
-            },
-            orderBy: { timestamp: "desc" },
-        });
-        res.json(logs);
-    }
-);
 
 export default router;
